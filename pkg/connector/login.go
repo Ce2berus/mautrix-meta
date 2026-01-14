@@ -186,6 +186,18 @@ func (m *MetaCookieLogin) Start(ctx context.Context) (*bridgev2.LoginStep, error
 	default:
 		return nil, fmt.Errorf("unknown mode %s", m.Mode)
 	}
+	// Add optional proxy field
+	step.CookiesParams.Fields = append(step.CookiesParams.Fields, bridgev2.LoginCookieField{
+		ID:       "proxy",
+		Required: false,
+		Sources: []bridgev2.LoginCookieFieldSource{
+			{
+				Type: bridgev2.LoginCookieTypeSpecial,
+				Name: "proxy",
+			},
+		},
+		Pattern: `^(https?://|socks5://).+$`,
+	})
 	return step, nil
 }
 
@@ -200,9 +212,15 @@ var (
 	ErrLoginUnknown          = bridgev2.RespError{ErrCode: "M_UNKNOWN", Err: "Internal error logging in", StatusCode: http.StatusInternalServerError}
 )
 
-func getMessagixClient(log zerolog.Logger, conn *MetaConnector, c *cookies.Cookies) (*messagix.Client, error) {
+func getMessagixClient(log zerolog.Logger, conn *MetaConnector, c *cookies.Cookies, userProxy string) (*messagix.Client, error) {
 	client := messagix.NewClient(c, log, conn.getMessagixConfig())
-	if conn.Config.GetProxyFrom != "" || conn.Config.Proxy != "" {
+	// User-level proxy takes precedence over global config proxy
+	if userProxy != "" {
+		if err := client.SetProxy(userProxy); err != nil {
+			return nil, fmt.Errorf("failed to set user proxy: %w", err)
+		}
+		log.Debug().Str("proxy", userProxy).Msg("Using user-level proxy for login")
+	} else if conn.Config.GetProxyFrom != "" || conn.Config.Proxy != "" {
 		client.GetNewProxy = conn.getProxy
 		if !client.UpdateProxy("login") {
 			return nil, fmt.Errorf("failed to update proxy")
@@ -218,6 +236,7 @@ func loginWithCookies(
 	bridgeUser *bridgev2.User,
 	conn *MetaConnector,
 	c *cookies.Cookies,
+	userProxy string,
 ) (*bridgev2.LoginStep, error) {
 
 	log.Debug().
@@ -263,6 +282,7 @@ func loginWithCookies(
 			Platform: c.Platform,
 			Cookies:  c,
 			LoginUA:  loginUA,
+			Proxy:    userProxy,
 		},
 	}, nil)
 	if err != nil {
@@ -293,6 +313,9 @@ func loginWithCookies(
 func (m *MetaCookieLogin) SubmitCookies(ctx context.Context, strCookies map[string]string) (*bridgev2.LoginStep, error) {
 	c := &cookies.Cookies{Platform: m.Mode}
 	strCookiesCopy := map[cookies.MetaCookieName]string{}
+	// Extract proxy before processing cookies
+	userProxy := strCookies["proxy"]
+	delete(strCookies, "proxy")
 	for key, val := range strCookies {
 		strCookiesCopy[cookies.MetaCookieName(key)] = val
 	}
@@ -304,11 +327,11 @@ func (m *MetaCookieLogin) SubmitCookies(ctx context.Context, strCookies map[stri
 	}
 
 	log := m.User.Log.With().Str("component", "messagix").Logger()
-	client, err := getMessagixClient(log, m.Main, c)
+	client, err := getMessagixClient(log, m.Main, c, userProxy)
 	if err != nil {
 		return nil, err
 	}
-	return loginWithCookies(ctx, log, client, m.User, m.Main, c)
+	return loginWithCookies(ctx, log, client, m.User, m.Main, c, userProxy)
 }
 
 type MetaNativeLogin struct {
@@ -328,6 +351,7 @@ func (m *MetaNativeLogin) Start(ctx context.Context) (*bridgev2.LoginStep, error
 			Fields: []bridgev2.LoginInputDataField{
 				{ID: "username", Name: "Email address", Type: bridgev2.LoginInputFieldTypeEmail},
 				{ID: "password", Name: "Password", Type: bridgev2.LoginInputFieldTypePassword},
+				{ID: "proxy", Name: "Proxy (optional)", Description: "HTTP/HTTPS/SOCKS5 proxy URL", Pattern: `^(https?://|socks5://).+$`},
 			},
 		},
 	}, nil
@@ -338,8 +362,9 @@ func (m *MetaNativeLogin) SubmitUserInput(ctx context.Context, input map[string]
 		Platform: m.Mode,
 	}
 
+	userProxy := input["proxy"]
 	log := m.User.Log.With().Str("component", "messagix").Logger()
-	client, err := getMessagixClient(log, m.Main, fakeCookies)
+	client, err := getMessagixClient(log, m.Main, fakeCookies, userProxy)
 	if err != nil {
 		return nil, err
 	}
@@ -351,7 +376,7 @@ func (m *MetaNativeLogin) SubmitUserInput(ctx context.Context, input map[string]
 
 	client.GetCookies().UpdateValues(c.GetAll())
 
-	step, err := loginWithCookies(ctx, log, client, m.User, m.Main, c)
+	step, err := loginWithCookies(ctx, log, client, m.User, m.Main, c, userProxy)
 	if err != nil {
 		return nil, err
 	}

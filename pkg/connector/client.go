@@ -101,6 +101,12 @@ func (m *MetaConnector) LoadUserLogin(ctx context.Context, login *bridgev2.UserL
 	c.editChannels = exsync.NewMap[string, chan *FBEditEvent]()
 	if messagixClient != nil {
 		messagixClient.SetEventHandler(c.handleMetaEvent)
+		// Apply user-level proxy if configured
+		if loginMetadata.Proxy != "" {
+			if err := messagixClient.SetProxy(loginMetadata.Proxy); err != nil {
+				login.Log.Err(err).Str("proxy", loginMetadata.Proxy).Msg("Failed to set user proxy during load")
+			}
+		}
 	}
 	login.Client = c
 	return nil
@@ -212,7 +218,18 @@ func (m *MetaClient) connectWithRetry(retryCtx, ctx context.Context, attempts in
 	} else {
 		zerolog.Ctx(ctx).Debug().Msg("No saved reconnection state")
 	}
-	if m.Main.Config.GetProxyFrom != "" || m.Main.Config.Proxy != "" {
+	// User-level proxy takes precedence over global config proxy
+	if m.LoginMeta.Proxy != "" {
+		if err := cli.SetProxy(m.LoginMeta.Proxy); err != nil {
+			zerolog.Ctx(ctx).Err(err).Str("proxy", m.LoginMeta.Proxy).Msg("Failed to set user proxy")
+			m.UserLogin.BridgeState.Send(status.BridgeState{
+				StateEvent: status.StateUnknownError,
+				Error:      MetaProxyUpdateFail,
+			})
+			return
+		}
+		zerolog.Ctx(ctx).Debug().Str("proxy", m.LoginMeta.Proxy).Msg("Using user-level proxy for connection")
+	} else if m.Main.Config.GetProxyFrom != "" || m.Main.Config.Proxy != "" {
 		cli.GetNewProxy = m.Main.getProxy
 		if !cli.UpdateProxy("connect") {
 			m.UserLogin.BridgeState.Send(status.BridgeState{
@@ -556,6 +573,12 @@ func (m *MetaClient) FullReconnect() {
 	m.disconnect(false)
 	m.Client = messagix.NewClient(m.LoginMeta.Cookies, m.UserLogin.Log.With().Str("component", "messagix").Logger(), m.Main.getMessagixConfig())
 	m.Client.SetEventHandler(m.handleMetaEvent)
+	// Apply user-level proxy if configured
+	if m.LoginMeta.Proxy != "" {
+		if err := m.Client.SetProxy(m.LoginMeta.Proxy); err != nil {
+			m.UserLogin.Log.Err(err).Str("proxy", m.LoginMeta.Proxy).Msg("Failed to set user proxy during full reconnect")
+		}
+	}
 	m.Connect(ctx)
 	m.lastFullReconnect = time.Now()
 }

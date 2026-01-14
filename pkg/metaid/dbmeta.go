@@ -31,6 +31,7 @@ type UserLoginMetadata struct {
 	WADeviceID uint16           `json:"wa_device_id,omitempty"`
 	PushKeys   *PushKeys        `json:"push_keys,omitempty"`
 	LoginUA    string           `json:"login_ua,omitempty"`
+	Proxy      string           `json:"proxy,omitempty"`
 }
 
 type PushKeys struct {
